@@ -1,0 +1,261 @@
+service: appointment-service
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    NODE_ENV: ${env:NODE_ENV, 'development'}
+    DYNAMODB_TABLE_NAME: ${env:DYNAMODB_TABLE_NAME, 'AppointmentTable-dev'}
+    SNS_TOPIC_ARN: 
+      Ref: AppointmentTopic
+    SQS_QUEUE_URL_PE: 
+      Ref: AppointmentQueuePE
+    SQS_QUEUE_URL_CL: 
+      Ref: AppointmentQueueCL
+    SQS_NOTIFICATION_QUEUE_URL: 
+      Ref: NotificationQueue
+    EVENT_BUS_NAME: 
+      Ref: AppointmentEventBus
+    RDS_HOST_PE: ${env:RDS_HOST_PE, 'tu-endpoint-rds-pe.region.rds.amazonaws.com'}
+    RDS_PORT_PE: ${env:RDS_PORT_PE, '3306'}
+    RDS_USERNAME_PE: ${env:RDS_USERNAME_PE, 'admin'}
+    RDS_PASSWORD_PE: ${env:RDS_PASSWORD_PE, 'tu-contraseña'}
+    RDS_DATABASE_PE: ${env:RDS_DATABASE_PE, 'appointments_pe'}
+    RDS_HOST_CL: ${env:RDS_HOST_CL, 'tu-endpoint-rds-cl.region.rds.amazonaws.com'}
+    RDS_PORT_CL: ${env:RDS_PORT_CL, '3306'}
+    RDS_USERNAME_CL: ${env:RDS_USERNAME_CL, 'admin'}
+    RDS_PASSWORD_CL: ${env:RDS_PASSWORD_CL, 'tu-contraseña'}
+    RDS_DATABASE_CL: ${env:RDS_DATABASE_CL, 'appointments_cl'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:BatchWriteItem
+          Resource: !GetAtt AppointmentTable.Arn
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+          Resource: !Join
+            - ""
+            - - !GetAtt AppointmentTable.Arn
+              - "/index/InsuredIdIndex"
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource: !Ref AppointmentTopic
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            - !GetAtt AppointmentQueuePE.Arn
+            - !GetAtt AppointmentQueueCL.Arn
+            - !GetAtt NotificationQueue.Arn
+        - Effect: Allow
+          Action:
+            - events:PutEvents
+          Resource: !GetAtt AppointmentEventBus.Arn
+  logs:
+    restApi:
+      accessLogging: true
+      executionLogging: true
+      level: INFO
+      fullExecutionData: true
+      roleManagedExternally: false
+
+functions:
+  api:
+    handler: dist/lambda.handler
+    timeout: 30
+    environment: {}
+    events:
+      - http:
+          method: any
+          path: /{proxy+}
+  appointmentPE:
+    handler: dist/lambdas/appointment-pe.handler
+    environment:
+      COUNTRY_ISO: PE
+      SHOULD_CONNECT_DB: 'true'
+    events:
+      - sqs:
+          arn: !GetAtt AppointmentQueuePE.Arn
+  appointmentCL:
+    handler: dist/lambdas/appointment-cl.handler
+    environment:
+      COUNTRY_ISO: CL
+      SHOULD_CONNECT_DB: 'true'
+    events:
+      - sqs:
+          arn: !GetAtt AppointmentQueueCL.Arn
+  notificationProcessor:
+    handler: dist/lambdas/notification-processor.handler
+    environment: {}
+    events:
+      - sqs:
+          arn: !GetAtt NotificationQueue.Arn
+
+resources:
+  Resources:
+    # DynamoDB Table
+    AppointmentTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: AppointmentTable-${opt:stage, 'dev'}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: insuredId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: InsuredIdIndex
+            KeySchema:
+              - AttributeName: insuredId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+    
+    # SNS Topic
+    AppointmentTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: AppointmentTopic-${opt:stage, 'dev'}
+    
+    # SNS Topic Subscriptions
+    AppointmentTopicSubscriptionPE:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: !Ref AppointmentTopic
+        Protocol: sqs
+        Endpoint: !GetAtt AppointmentQueuePE.Arn
+        FilterPolicy: 
+          countryISO: ["PE"]
+    
+    AppointmentTopicSubscriptionCL:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: !Ref AppointmentTopic
+        Protocol: sqs
+        Endpoint: !GetAtt AppointmentQueueCL.Arn
+        FilterPolicy:
+          countryISO: ["CL"]
+    
+    # SQS Queues
+    AppointmentQueuePE:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: AppointmentQueuePE-${opt:stage, 'dev'}
+    
+    AppointmentQueueCL:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: AppointmentQueueCL-${opt:stage, 'dev'}
+    
+    NotificationQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: NotificationQueue-${opt:stage, 'dev'}
+    
+    # SQS Queue Policies
+    AppointmentQueuePEPolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref AppointmentQueuePE
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal: '*'
+              Action: sqs:SendMessage
+              Resource: !GetAtt AppointmentQueuePE.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !Ref AppointmentTopic
+    
+    AppointmentQueueCLPolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref AppointmentQueueCL
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal: '*'
+              Action: sqs:SendMessage
+              Resource: !GetAtt AppointmentQueueCL.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !Ref AppointmentTopic
+    
+    NotificationQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref NotificationQueue
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt NotificationQueue.Arn
+    
+    # EventBridge
+    AppointmentEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: AppointmentEventBus-${opt:stage, 'dev'}
+    
+    # EventBridge Rule
+    AppointmentCompletedRule:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName: !Ref AppointmentEventBus
+        EventPattern:
+          source:
+            - "appointment-service"
+          detail-type:
+            - "appointment.completed"
+        Targets:
+          - Id: NotificationQueue
+            Arn: !GetAtt NotificationQueue.Arn
+
+plugins:
+  - serverless-offline
+  - serverless-dotenv-plugin
+
+custom:
+  serverless-offline:
+    httpPort: 3000
+  dotenv:
+    include:
+      - NODE_ENV
+      - DYNAMODB_TABLE_NAME
+      - RDS_HOST_PE
+      - RDS_PORT_PE
+      - RDS_USERNAME_PE
+      - RDS_PASSWORD_PE
+      - RDS_DATABASE_PE
+      - RDS_HOST_CL
+      - RDS_PORT_CL
+      - RDS_USERNAME_CL
+      - RDS_PASSWORD_CL
+      - RDS_DATABASE_CL 
