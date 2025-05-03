@@ -22,6 +22,7 @@ async function bootstrap() {
     .setDescription('API for scheduling medical appointments')
     .setVersion('1.0')
     .addTag('appointments')
+    .addServer('/dev')
     .build();
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, document);
