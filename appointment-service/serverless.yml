@@ -1,4 +1,5 @@
 service: appointment-service
+useDotenv: true
 
 provider:
   name: aws
@@ -240,22 +241,7 @@ resources:
 
 plugins:
   - serverless-offline
-  - serverless-dotenv-plugin
 
 custom:
   serverless-offline:
-    httpPort: 3000
-  dotenv:
-    include:
-      - NODE_ENV
-      - DYNAMODB_TABLE_NAME
-      - RDS_HOST_PE
-      - RDS_PORT_PE
-      - RDS_USERNAME_PE
-      - RDS_PASSWORD_PE
-      - RDS_DATABASE_PE
-      - RDS_HOST_CL
-      - RDS_PORT_CL
-      - RDS_USERNAME_CL
-      - RDS_PASSWORD_CL
-      - RDS_DATABASE_CL 
+    httpPort: 3000 
