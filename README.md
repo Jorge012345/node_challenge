@@ -181,3 +181,17 @@ Para una simulación local más completa del flujo asíncrono, necesitarías ins
 ## Autor
 
 Jorge Terrazas
+
+## Pruebas Unitarias
+
+Para ejecutar las pruebas unitarias del `appointment-service`:
+
+1.  Navega al directorio del servicio:
+    ```bash
+    cd appointment-service
+    ```
+2.  Ejecuta el comando de prueba de npm:
+    ```bash
+    npm test
+    ```
+    Esto utilizará Jest para correr todas las pruebas unitarias definidas en los archivos `*.spec.ts` dentro del servicio.

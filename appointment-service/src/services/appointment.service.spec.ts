@@ -4,6 +4,22 @@ import { DynamoDBService } from './dynamodb.service';
 import { SNSService } from './sns.service';
 import { CreateAppointmentDto } from '../dto/create-appointment.dto';
 import { Appointment, AppointmentStatus } from '../models/appointment.model';
+import { Logger } from '@nestjs/common';
+
+jest.mock('uuid', () => ({
+  v4: jest.fn(() => 'mocked-uuid-12345'),
+}));
+
+
+const mockDynamoDBService = {
+  saveAppointment: jest.fn(),
+  getAppointmentsByInsuredId: jest.fn(),
+  updateAppointmentStatus: jest.fn(),
+};
+
+const mockSNSService = {
+  publishAppointment: jest.fn(),
+};
 
 describe('AppointmentService', () => {
   let service: AppointmentService;
@@ -14,26 +30,18 @@ describe('AppointmentService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AppointmentService,
-        {
-          provide: DynamoDBService,
-          useValue: {
-            saveAppointment: jest.fn(),
-            getAppointmentsByInsuredId: jest.fn(),
-            updateAppointmentStatus: jest.fn(),
-          },
-        },
-        {
-          provide: SNSService,
-          useValue: {
-            publishAppointment: jest.fn(),
-          },
-        },
+        { provide: DynamoDBService, useValue: mockDynamoDBService },
+        { provide: SNSService, useValue: mockSNSService },
+        
       ],
     }).compile();
 
     service = module.get<AppointmentService>(AppointmentService);
     dynamoDBService = module.get<DynamoDBService>(DynamoDBService);
     snsService = module.get<SNSService>(SNSService);
+
+    
+    jest.clearAllMocks();
   });
 
   it('should be defined', () => {
@@ -41,78 +49,117 @@ describe('AppointmentService', () => {
   });
 
   describe('createAppointment', () => {
-    it('should create an appointment and publish to SNS', async () => {
-      const dto: CreateAppointmentDto = {
+    it('should create, save to DynamoDB, and publish to SNS', async () => {
+      const createDto: CreateAppointmentDto = {
         insuredId: '12345',
-        scheduleId: 100,
+        scheduleId: 101,
         countryISO: 'PE',
       };
 
-      const savedAppointment: Appointment = {
-        id: 'test-id',
-        insuredId: dto.insuredId,
-        scheduleId: dto.scheduleId,
-        countryISO: dto.countryISO,
+      const expectedAppointmentBase: Partial<Appointment> = {
+        insuredId: createDto.insuredId,
+        scheduleId: createDto.scheduleId,
+        countryISO: createDto.countryISO,
         status: AppointmentStatus.PENDING,
-        createdAt: '2023-01-01T00:00:00Z',
-        updatedAt: '2023-01-01T00:00:00Z',
+        id: 'mocked-uuid-12345',
       };
+      
+      
+      const savedAppointment: Appointment = {
+        ...expectedAppointmentBase,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } as Appointment;
 
-      jest.spyOn(dynamoDBService, 'saveAppointment').mockResolvedValue(savedAppointment);
-      jest.spyOn(snsService, 'publishAppointment').mockResolvedValue();
+      mockDynamoDBService.saveAppointment.mockResolvedValue(savedAppointment);
+      mockSNSService.publishAppointment.mockResolvedValue(undefined);
 
-      const result = await service.createAppointment(dto);
+      const result = await service.createAppointment(createDto);
 
-      expect(dynamoDBService.saveAppointment).toHaveBeenCalled();
-      expect(snsService.publishAppointment).toHaveBeenCalledWith(savedAppointment);
+      expect(mockDynamoDBService.saveAppointment).toHaveBeenCalledTimes(1);
+      expect(mockDynamoDBService.saveAppointment).toHaveBeenCalledWith(
+        expect.objectContaining(expectedAppointmentBase),
+      );
+      
+      expect(mockSNSService.publishAppointment).toHaveBeenCalledTimes(1);
+      expect(mockSNSService.publishAppointment).toHaveBeenCalledWith(savedAppointment);
+
       expect(result).toEqual(savedAppointment);
+    });
+
+    it('should throw an error if DynamoDBService fails', async () => {
+      const createDto: CreateAppointmentDto = {
+        insuredId: '12345',
+        scheduleId: 101,
+        countryISO: 'PE',
+      };
+      const dbError = new Error('DynamoDB save failed');
+      mockDynamoDBService.saveAppointment.mockRejectedValue(dbError);
+
+      await expect(service.createAppointment(createDto)).rejects.toThrow(dbError);
+      expect(mockSNSService.publishAppointment).not.toHaveBeenCalled();
+    });
+
+    it('should throw an error if SNSService fails', async () => {
+      const createDto: CreateAppointmentDto = {
+        insuredId: '12345',
+        scheduleId: 101,
+        countryISO: 'PE',
+      };
+       const savedAppointment: Appointment = {
+        id: 'mocked-uuid-12345',
+        insuredId: createDto.insuredId,
+        scheduleId: createDto.scheduleId,
+        countryISO: createDto.countryISO,
+        status: AppointmentStatus.PENDING,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const snsError = new Error('SNS publish failed');
+      mockDynamoDBService.saveAppointment.mockResolvedValue(savedAppointment);
+      mockSNSService.publishAppointment.mockRejectedValue(snsError);
+
+      await expect(service.createAppointment(createDto)).rejects.toThrow(snsError);
+      expect(mockDynamoDBService.saveAppointment).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('getAppointmentsByInsuredId', () => {
-    it('should return appointments for an insured', async () => {
-      const insuredId = '12345';
-      const appointments: Appointment[] = [
-        {
-          id: 'test-id',
-          insuredId,
-          scheduleId: 100,
-          countryISO: 'PE',
-          status: AppointmentStatus.PENDING,
-          createdAt: '2023-01-01T00:00:00Z',
-          updatedAt: '2023-01-01T00:00:00Z',
-        },
+    it('should call DynamoDBService and return its result', async () => {
+      const insuredId = 'test-insured-id';
+      const mockAppointments: Appointment[] = [
+        { id: 'appt1', insuredId, scheduleId: 1, countryISO: 'PE', status: AppointmentStatus.COMPLETED, createdAt: '', updatedAt: '' },
       ];
-
-      jest.spyOn(dynamoDBService, 'getAppointmentsByInsuredId').mockResolvedValue(appointments);
+      mockDynamoDBService.getAppointmentsByInsuredId.mockResolvedValue(mockAppointments);
 
       const result = await service.getAppointmentsByInsuredId(insuredId);
 
-      expect(dynamoDBService.getAppointmentsByInsuredId).toHaveBeenCalledWith(insuredId);
-      expect(result).toEqual(appointments);
+      expect(mockDynamoDBService.getAppointmentsByInsuredId).toHaveBeenCalledTimes(1);
+      expect(mockDynamoDBService.getAppointmentsByInsuredId).toHaveBeenCalledWith(insuredId);
+      expect(result).toEqual(mockAppointments);
     });
   });
 
   describe('updateAppointmentStatus', () => {
-    it('should update appointment status', async () => {
-      const id = 'test-id';
-      const status = AppointmentStatus.COMPLETED;
-      const appointment: Appointment = {
-        id,
-        insuredId: '12345',
-        scheduleId: 100,
-        countryISO: 'PE',
-        status,
-        createdAt: '2023-01-01T00:00:00Z',
-        updatedAt: '2023-01-01T00:00:00Z',
+    it('should call DynamoDBService and return its result', async () => {
+      const appointmentId = 'appt-to-update';
+      const newStatus = AppointmentStatus.COMPLETED;
+      const mockUpdatedAppointment: Appointment = {
+        id: appointmentId, 
+        insuredId: 'insured1', 
+        scheduleId: 1, 
+        countryISO: 'CL', 
+        status: newStatus, 
+        createdAt: '', 
+        updatedAt: new Date().toISOString(),
       };
+      mockDynamoDBService.updateAppointmentStatus.mockResolvedValue(mockUpdatedAppointment);
 
-      jest.spyOn(dynamoDBService, 'updateAppointmentStatus').mockResolvedValue(appointment);
+      const result = await service.updateAppointmentStatus(appointmentId, newStatus);
 
-      const result = await service.updateAppointmentStatus(id, status);
-
-      expect(dynamoDBService.updateAppointmentStatus).toHaveBeenCalledWith(id, status);
-      expect(result).toEqual(appointment);
+      expect(mockDynamoDBService.updateAppointmentStatus).toHaveBeenCalledTimes(1);
+      expect(mockDynamoDBService.updateAppointmentStatus).toHaveBeenCalledWith(appointmentId, newStatus);
+      expect(result).toEqual(mockUpdatedAppointment);
     });
   });
 }); 
